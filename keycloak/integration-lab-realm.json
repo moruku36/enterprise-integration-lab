@@ -1,0 +1,90 @@
+{
+  "realm": "integration-lab",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "cases_viewer"
+      },
+      {
+        "name": "cases_importer"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "lab-web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8000/auth/callback"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles"
+      ],
+      "protocolMappers": [
+        {
+          "name": "Cases API audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "cases-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "viewer",
+      "enabled": true,
+      "firstName": "Lab",
+      "lastName": "viewer",
+      "email": "viewer@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-viewer-only",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "cases_viewer"
+      ]
+    },
+    {
+      "username": "importer",
+      "enabled": true,
+      "firstName": "Lab",
+      "lastName": "importer",
+      "email": "importer@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-importer-only",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "cases_viewer",
+        "cases_importer"
+      ]
+    }
+  ]
+}

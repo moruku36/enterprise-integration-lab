@@ -2,7 +2,7 @@
 
 **English** | [日本語](README.ja.md)
 
-A design-stage lab for integrating an enterprise identity provider, a protected API, and a resumable data import. The scenario uses fictional users and case records. No cloud account or AI model is required for the planned local lab.
+A learning lab for integrating an enterprise identity provider, a protected API, and a resumable data import. The scenario uses fictional users and case records. No cloud account or AI model is required for the planned local lab.
 
 ## The exercise
 
@@ -12,4 +12,5 @@ A design-stage lab for integrating an enterprise identity provider, a protected 
 
 [Architecture and sequence diagrams](docs/architecture.md) · [Milestones and acceptance checks](docs/acceptance.md)
 
-**Status:** design only. There is no runnable implementation or test result yet. The first milestone intentionally stops at local OIDC and role enforcement.
+**Status:** M1 is implemented for local use. [Run the OIDC and API authorization exercise](docs/m1-local.md).
+SAML and data import are planned; the current import endpoint is a stub.

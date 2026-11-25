@@ -1,0 +1,8 @@
+services:
+  identity:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start-dev", "--import-realm", "--hostname=http://localhost:8180"]
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - ./keycloak/integration-lab-realm.json:/opt/keycloak/data/import/integration-lab-realm.json:ro

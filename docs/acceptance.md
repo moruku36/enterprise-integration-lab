@@ -2,7 +2,7 @@
 
 [English README](../README.md) · [日本語 README](../README.ja.md)
 
-These are planned checks, not test results. Use local containers and synthetic data throughout.
+Use local containers and synthetic data throughout. See the [M1 runbook](m1-local.md) for the runnable checks; M2 and M3 remain planned.
 
 | Identity | List cases | Request import | Read mock API |
 | --- | --- | --- | --- |
@@ -13,9 +13,9 @@ These are planned checks, not test results. Use local containers and synthetic d
 
 ## M1: OIDC and API authorization
 
-- [ ] Start a local Keycloak realm and FastAPI with Docker Compose. Sign in with Authorization Code + PKCE (S256).
-- [ ] Unauthenticated API request returns 401; viewer lists the fixtures but receives 403 when requesting import; importer reaches a harmless stub.
-- [ ] The API rejects expired credentials, an ID token, and an access token meant for another audience.
+- [x] Start a local Keycloak realm and FastAPI with Docker Compose. Sign in with Authorization Code + PKCE (S256).
+- [x] Unauthenticated API request returns 401; viewer lists the fixtures but receives 403 when requesting import; importer reaches a harmless stub.
+- [x] The API rejects expired credentials, an ID token, and an access token meant for another audience.
 - [ ] Learning exercise: predict what changes when a test account loses its importer role; obtain a new session/token and verify the result. Document the remaining lifetime of previously issued tokens separately.
 
 ## M2: Customer SAML federation
