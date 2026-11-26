@@ -12,5 +12,12 @@
 
 [設計と構成図（英語）](docs/architecture.md) · [実装順と合格条件（英語）](docs/acceptance.md)
 
-**現在地：M1をローカル向けに実装。** [OIDCログインとAPI権限を試す（英語）](docs/m1-local.md)。
-SAMLとデータ連携は未実装で、取り込みはまだ受付だけです。
+**現在地：M1・M2をローカル向けに実装。** [OIDCログインとAPI権限を試す（英語）](docs/m1-local.md)・[顧客SAML連携を試す（英語）](docs/m2-local.md)。
+[サービスIDで3ページのデータを取得する（英語）](docs/m3-service-identity.md)（M3a）。
+[CLIでSQLiteへの取り込みと障害からの再開を試す（英語）](docs/m3-recovery.md)（M3b）。
+[画面で取り込みを依頼し、同じ実行IDで進捗を確認する（英語）](docs/m3-staff-requests.md)（M3c）。取り込みの開始はローカルの運用担当者がCLIで行います。
+ローカルの運用担当者は、開始・再開の前に[待ち行列を確認できます（英語）](docs/m3-staff-requests.md#inspect-the-queue-m3d)（M3d）。
+未開始の依頼だけを[取り消すこともできます（英語）](docs/m3-staff-requests.md#cancel-a-queued-request-m3e)（M3e）。
+依頼の履歴や取り込み済みデータは削除されません。同じ依頼を再送しても、元のIDで取り消し済みと表示されます。
+完了後、[取り込み先のデータを固定の正解と照合できます（英語・日本語補足）](docs/m3-recovery.md#reconcile-a-completed-import-m3f)（M3f）。
+[サーバーを起動せず、コマンド1つで照合を体験できます](docs/m3-recovery.md#try-reconciliation-without-running-services-m3g)（M3g）。

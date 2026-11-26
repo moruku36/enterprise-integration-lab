@@ -3,6 +3,8 @@ import os
 import re
 import time
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from html import unescape
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ from fastapi.testclient import TestClient
 import httpx
 import jwt
 
+import import_job
 from app import AUDIENCE, CLIENT, COOKIE, ISSUER, ORIGIN, app, jwks, sessions
 
 
@@ -87,18 +90,21 @@ class BrowserFlow(unittest.TestCase):
         self.assertNotIn(pre_auth, sessions)
 
     def test_users_have_distinct_roles_after_real_oidc(self):
-        for account, import_status in [("viewer", 403), ("importer", 202)]:
+        directory = self.enterContext(TemporaryDirectory())
+        self.enterContext(patch.object(import_job, "STATE_ROOT", Path(directory) / "state"))
+        for account, import_status in [("viewer", 403), ("importer", 303)]:
             with self.subTest(account=account):
                 with TestClient(app, base_url=ORIGIN, follow_redirects=False) as browser:
                     self.sign_in(browser, account)
                     home = browser.get("/")
                     self.assertIn("List API: HTTP 200", home.text)
                     csrf = re.search(r'name="csrf" value="([^"]+)"', home.text).group(1)
-                    self.assertEqual(browser.post("/import", data={"csrf": csrf}).status_code, 403)
-                    response = browser.post("/import", data={"csrf": csrf}, headers={"Origin": ORIGIN})
+                    key = re.search(r'name="key" value="([a-f0-9]{32})"', home.text).group(1)
+                    self.assertEqual(browser.post("/import", data={"csrf": csrf, "key": key}).status_code, 403)
+                    response = browser.post("/import", data={"csrf": csrf, "key": key}, headers={"Origin": ORIGIN})
                     self.assertEqual(response.status_code, import_status)
-                    if import_status == 202:
-                        self.assertEqual(response.json(), {"status": "accepted_stub", "import_started": False})
+                    if import_status == 303:
+                        self.assertIn("queued", browser.get(response.headers["location"]).text)
                     self.assertEqual(browser.post("/logout", data={"csrf": csrf}, headers={"Origin": ORIGIN}).status_code, 303)
                     self.assertIn("Sign in", browser.get("/").text)
 

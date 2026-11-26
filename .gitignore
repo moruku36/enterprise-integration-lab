@@ -2,3 +2,8 @@
 __pycache__/
 *.py[cod]
 .env
+
+# Generated synthetic keys and realm imports (never commit).
+/.keycloak-m2/
+/.keycloak-m3-fixture/
+/.import-lab/
