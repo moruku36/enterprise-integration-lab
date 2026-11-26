@@ -19,13 +19,14 @@ On Windows, use `.venv\Scripts\python.exe` instead of `.venv/bin/python`. Open
 [http://localhost:8000](http://localhost:8000), not the numeric IP: the callback and
 issuer are fixed to `localhost`. Give Keycloak a few seconds to import the realm.
 
-| Synthetic account | Fixture password | List | Try import |
+| Synthetic account | Fixture password | List | Request import |
 | --- | --- | --- | --- |
 | `viewer` | `local-viewer-only` | 200 | 403 |
-| `importer` | `local-importer-only` | 200 | 202 (stub; nothing imported) |
+| `importer` | `local-importer-only` | 200 | 303 to the queued run's status page |
 
 Use a new private browser window or browser profile to switch users. **End app session**
-clears the app cookie, not the upstream Keycloak SSO session.
+clears the app cookie, not the upstream Keycloak SSO session. M1 originally accepted a stub;
+on the current branch [M3c](m3-staff-requests.md) saves a request but does not start it automatically.
 
 ## What to inspect
 
@@ -63,5 +64,7 @@ In PowerShell, set `$env:RUN_LOCAL_OIDC = "1"` before invoking Python. Finish wi
 
 M1 is a single-process learning lab: in-memory app sessions, Keycloak development mode,
 plain loopback HTTP, fixed audience and test accounts. Do not reuse these credentials or
-copy this setup into production. M2 (SAML), M3 (worker identity, business API and resumable
-import), federated logout and production operations are not implemented.
+copy this setup into production. For SAML, use the separate [M2 fixture](m2-local.md).
+See the [M3a fixture](m3-service-identity.md) for the standalone worker identity and
+mock business API. Resumable import, federated logout and production operations are
+not covered by M1.

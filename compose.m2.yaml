@@ -1,0 +1,20 @@
+name: enterprise-integration-lab-m2
+services:
+  identity:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start-dev", "--import-realm", "--hostname=http://localhost:8180"]
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - type: bind
+        source: ./.keycloak-m2/integration-lab-realm.json
+        target: /opt/keycloak/data/import/integration-lab-realm.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.keycloak-m2/customer-lab-realm.json
+        target: /opt/keycloak/data/import/customer-lab-realm.json
+        read_only: true
+        bind:
+          create_host_path: false

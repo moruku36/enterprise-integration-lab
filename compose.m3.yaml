@@ -1,0 +1,14 @@
+name: enterprise-integration-lab-m3
+services:
+  identity:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start-dev", "--import-realm", "--hostname=http://localhost:8180"]
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - type: bind
+        source: ./.keycloak-m3-fixture/realms
+        target: /opt/keycloak/data/import
+        read_only: true
+        bind:
+          create_host_path: false

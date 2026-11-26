@@ -1,7 +1,9 @@
 """Local-only OIDC exercise. Not a production deployment."""
 from dataclasses import dataclass, field
 from html import escape
+import re
 import secrets
+import sqlite3
 import time
 from typing import Annotated
 
@@ -13,7 +15,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import httpx
 import jwt
 from joserfc.errors import JoseError
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from import_job import REQUEST_KEY, RUN_ID
+import staff_requests
+from worker import LabError
 
 ISSUER = "http://localhost:8180/realms/integration-lab"
 ORIGIN = "http://localhost:8000"
@@ -83,9 +90,15 @@ def denied() -> HTTPException:
     return HTTPException(401, "Valid API access token required", headers={"WWW-Authenticate": "Bearer"})
 
 
+@dataclass(frozen=True)
+class Staff:
+    subject: str
+    roles: frozenset[str]
+
+
 def permissions(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-) -> frozenset[str]:
+) -> Staff:
     if not credentials or len(credentials.credentials) > 8192:
         raise denied()
     token = credentials.credentials
@@ -102,25 +115,66 @@ def permissions(
         raise HTTPException(503, "Identity service unavailable") from None
     except jwt.PyJWTError:
         raise denied() from None
-    if claims.get("typ") != "Bearer" or claims.get("azp") != CLIENT:
+    subject = claims.get("sub")
+    if (claims.get("typ") != "Bearer" or claims.get("azp") != CLIENT
+            or not isinstance(subject, str) or not 0 < len(subject) <= 256):
         raise denied()
     realm = claims.get("realm_access")
     roles = realm.get("roles") if isinstance(realm, dict) else None
-    return frozenset(r for r in roles if isinstance(r, str)) if isinstance(roles, list) else frozenset()
+    role_set = frozenset(r for r in roles if isinstance(r, str)) if isinstance(roles, list) else frozenset()
+    return Staff(subject, role_set)
 
 
 @app.get("/api/cases")
-def list_cases(roles: Annotated[frozenset[str], Depends(permissions)]):
-    if not roles.intersection({"cases_viewer", "cases_importer"}):
+def list_cases(staff: Annotated[Staff, Depends(permissions)]):
+    if not staff.roles.intersection({"cases_viewer", "cases_importer"}):
         raise HTTPException(403, "Case access required")
     return CASES
 
 
-@app.post("/api/imports", status_code=202)
-def request_import(roles: Annotated[frozenset[str], Depends(permissions)]):
-    if "cases_importer" not in roles:
+def importer(staff: Annotated[Staff, Depends(permissions)]) -> Staff:
+    if "cases_importer" not in staff.roles:
         raise HTTPException(403, "Importer role required")
-    return {"status": "accepted_stub", "import_started": False}
+    return staff
+
+
+def api_result(result: dict, *, status_code: int = 200) -> JSONResponse:
+    url = "/api/imports/" + result["run_id"]
+    return JSONResponse({**result, "status_url": url}, status_code=status_code, headers={"Location": url})
+
+
+@app.post("/api/imports", status_code=202)
+async def request_import(request: Request, staff: Annotated[Staff, Depends(importer)]):
+    keys = request.headers.getlist("idempotency-key")
+    if len(keys) != 1 or not REQUEST_KEY.fullmatch(keys[0]):
+        raise HTTPException(400, "Provide one Idempotency-Key (16 to 64 URL-safe characters)")
+    async for chunk in request.stream():
+        if chunk:
+            raise HTTPException(400, "Staff import requests must not contain a body")
+    try:
+        result, created = await run_in_threadpool(staff_requests.accept, staff.subject, keys[0])
+    except LabError as error:
+        if error.code == "queue_full":
+            raise HTTPException(409, "Local import queue is full") from None
+        raise HTTPException(503, "Local import store unavailable") from None
+    except (OSError, sqlite3.Error):
+        raise HTTPException(503, "Local import store unavailable") from None
+    return api_result(result, status_code=202 if created else 200)
+
+
+@app.get("/api/imports/{run_id}")
+def import_status(run_id: str, staff: Annotated[Staff, Depends(importer)]):
+    if not RUN_ID.fullmatch(run_id):
+        raise HTTPException(404, "Import request not found")
+    try:
+        result = staff_requests.status(staff.subject, run_id)
+    except LabError as error:
+        if error.code in {"unknown_store", "unknown_request"}:
+            raise HTTPException(404, "Import request not found") from None
+        raise HTTPException(503, "Local import store unavailable") from None
+    except (OSError, sqlite3.Error):
+        raise HTTPException(503, "Local import store unavailable") from None
+    return api_result(result)
 
 
 @app.get("/login")
@@ -159,12 +213,15 @@ async def callback(request: Request):
     return set_session(RedirectResponse("/", status_code=303), key, ttl)
 
 
-async def call_api(request: Request, method: str, path: str) -> httpx.Response:
+async def call_api(request: Request, method: str, path: str, *, key: str | None = None) -> httpx.Response:
     if not (token := request.session.get("access_token")):
         raise HTTPException(401, "Sign in first")
     # Exercise the same public API boundary without sending the token over a socket.
+    headers = {"Authorization": "Bearer " + token}
+    if key is not None:
+        headers["Idempotency-Key"] = key
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:
-        return await client.request(method, path, headers={"Authorization": "Bearer " + token})
+        return await client.request(method, path, headers=headers)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -174,13 +231,14 @@ async def home(request: Request):
     result = await call_api(request, "GET", "/api/cases")
     csrf = escape(request.session["csrf"], quote=True)
     data = escape(result.text)
+    request_key = secrets.token_hex(16)
     return f'''<h1>Enterprise Integration Lab</h1>
 <p>List API: HTTP {result.status_code}</p><pre>{data}</pre>
-<form method="post" action="/import"><button>Try import</button><input type="hidden" name="csrf" value="{csrf}"></form>
+<form method="post" action="/import"><button>Request import</button><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="key" value="{request_key}"></form>
 <form method="post" action="/logout"><button>End app session</button><input type="hidden" name="csrf" value="{csrf}"></form>'''
 
 
-async def check_csrf(request: Request):
+async def check_csrf(request: Request, *, import_form: bool = False) -> str | None:
     if request.headers.get("origin") != ORIGIN:
         raise HTTPException(403, "Same-origin form required")
     if request.headers.get("content-type") != "application/x-www-form-urlencoded":
@@ -191,20 +249,45 @@ async def check_csrf(request: Request):
         supplied.extend(chunk)
         if len(supplied) > 128:
             raise HTTPException(413, "Form too large")
-    if not expected or not secrets.compare_digest(supplied, ("csrf=" + expected).encode("ascii")):
+    csrf, marker, key = supplied.partition(b"&key=")
+    if not expected or not secrets.compare_digest(csrf, ("csrf=" + expected).encode("ascii")):
         raise HTTPException(403, "CSRF verification failed")
+    if import_form:
+        if not marker or not re.fullmatch(rb"[a-f0-9]{32}", key):
+            raise HTTPException(400, "Invalid import form key")
+        return key.decode("ascii")
+    if marker:
+        raise HTTPException(400, "Invalid logout form")
 
 
-@app.post("/import", dependencies=[Depends(check_csrf)])
-async def browser_import(request: Request):
-    result = await call_api(request, "POST", "/api/imports")
+def api_error(result: httpx.Response) -> JSONResponse:
     return JSONResponse(result.json(), status_code=result.status_code, headers={
         key: value for key, value in result.headers.items() if key == "www-authenticate"
     })
 
 
-@app.post("/logout", dependencies=[Depends(check_csrf)])
+@app.post("/import")
+async def browser_import(request: Request):
+    key = await check_csrf(request, import_form=True)
+    result = await call_api(request, "POST", "/api/imports", key=key)
+    if result.status_code not in {200, 202}:
+        return api_error(result)
+    return RedirectResponse("/import/status/" + result.json()["run_id"], status_code=303)
+
+
+@app.get("/import/status/{run_id}", response_class=HTMLResponse)
+async def browser_import_status(request: Request, run_id: str):
+    if not RUN_ID.fullmatch(run_id):
+        raise HTTPException(404, "Import request not found")
+    result = await call_api(request, "GET", "/api/imports/" + run_id)
+    if result.status_code != 200:
+        return api_error(result)
+    return "<h1>Import status</h1><pre>" + escape(result.text) + '</pre><p><a href="/">Home</a></p>'
+
+
+@app.post("/logout")
 async def logout(request: Request):
+    await check_csrf(request)
     drop_session(request)
     response = RedirectResponse("/", status_code=303)
     response.delete_cookie(COOKIE)
