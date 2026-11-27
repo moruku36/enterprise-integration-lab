@@ -27,6 +27,32 @@ workload identity.
    `complete` and six processed records. The viewer cannot request a run or
    read status; a different importer cannot read this run by knowing its URL.
 
+## Find your recent requests (M3j)
+
+If the browser closes or the app restarts and you did not save the run ID,
+sign in again as the same importer and open **Recent import requests** on the
+home page. Select the original ID to continue tracking it. Use this view
+instead of submitting a new form just to recover the old ID.
+
+The API equivalent is read-only `GET /api/imports` with the existing staff
+bearer authentication. It returns `limit: 10` and an array called `requests`.
+Each entry has the same safe fields and status URL as the individual status
+response, including queued, cancelled and completed requests. These are the
+last ten accepted **for the authenticated subject**, newest acceptance first,
+not by last status change. The exercise has no pagination or timestamp
+contract. A missing store yields an empty list without creating a store; an
+unreadable store fails instead of pretending there are no requests.
+
+A viewer is denied. Another signed-in importer sees only their own requests,
+not yours; a browser cookie by itself does not authorize a direct API call.
+The list does not include owners, idempotency keys, source data, or the local
+operator's cooldown details. Reading it does not launch a worker, change any
+request, or examine another tenant. This lab still simulates one customer.
+
+**日本語メモ：** 画面を閉じて依頼IDを忘れても、同じ担当者でログインして
+「Recent import requests」から自分の最新10件を開けます。再依頼は不要です。
+一覧で他の担当者の依頼は見えず、閲覧権限だけの利用者は一覧を開けません。
+
 ## Inspect the queue (M3d)
 
 An operator can discover the pending IDs without copying them from a staff
@@ -49,6 +75,8 @@ status. It does not add a staff endpoint.
   Check whether the previous worker is still active before resuming.
 - `resume_after_recovery`: the prior failure is in the retryable allowlist.
   Confirm the dependency recovered and explicitly resume that same ID.
+- `wait_rate_limit`: a bounded source 429 deadline has not elapsed; see
+  `retry_not_before_unix` and [the cooldown exercise](m3-rate-limit.md).
 - `inspect_failure`: do not retry before inspecting the saved failure with
   `--store staff status <run-id>`.
 
@@ -127,6 +155,35 @@ Windows uses `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
 - There is no automatic dispatch, cancellation of running work, tenant isolation, or production
   durability claim. Keep the lab local and use only the simulated identities.
 
+## Compare both import identities without servers
+
+Run the targeted offline handoff tests:
+
+```sh
+.venv/bin/python -B -m unittest discover -s tests -p test_offline_identity_handoff.py -v
+```
+
+The offline identity matrix supplies the registered direct and federated
+roles. Separate disposable stores start from the same empty state. With
+each authorized importer the real app accepts one request (202); replay with
+the same key returns the same ID and does not dispatch work (200). The actual
+operator command follows an in-process synthetic workload grant and paging
+transport. A page-two 503 leaves one committed page and two records. Explicit
+resume keeps the same run ID, starts from page two, and reconciles six exact
+records. Direct/federated viewers and the unmapped account get 403 on the
+tested write and status operations without changing either store or lease.
+
+A second fixture deliberately supplies the same issuer, subject and allowed
+role on both input paths. At the app boundary they are the same owner for
+replay; a different subject gets a different request and cannot read the
+first one's URL. That does not link real accounts, establish they share a
+subject in Keycloak, or test a live login, token grant, or source API.
+
+**日本語メモ：** 直接ログイン相当とSAML経由相当の架空の権限を使い、同じ条件で
+依頼の再送、途中停止、同じIDでの再開を比べます。両方で6件を照合でき、
+閲覧者や未割り当て利用者の操作ではDBが変わりません。同一人物かどうかは、
+認証基盤がアプリに渡す利用者IDで判定する想定で、実アカウントの統合は試しません。
+
 ## Verify without using your staff store
 
 With only the M3 Keycloak container already running and ports 8000 and 8001
@@ -138,7 +195,8 @@ own app and source processes:
 ```
 
 It checks the real local OIDC and SAML flows, replay after app restart, denied
-access for another importer, a page-two failure and same-run resume, and exact
+access for another importer, owner-scoped listing after app restart (M3j),
+a page-two failure and same-run resume, and exact
 readback of one request, one run and six distinct rows. It does not read or
 modify the regular staff store. The reference run on macOS ARM64, Python 3.15.2
 and Keycloak 26.8.2 passed this check and all 21 suite tests, including live

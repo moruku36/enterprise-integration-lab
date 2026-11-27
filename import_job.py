@@ -3,11 +3,13 @@ import argparse
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 import json
+from math import ceil
 from pathlib import Path
 import re
 import sqlite3
 from stat import S_ISREG
 import sys
+from time import time
 from uuid import uuid4
 
 import httpx
@@ -37,6 +39,18 @@ RETRYABLE = frozenset({
     "token_http_502", "token_http_503", "token_http_504",
     "source_http_502", "source_http_503", "source_http_504",
 })
+
+# Add an optional side table without changing the existing import_runs schema.
+# An older CLI ignores this table and still refuses to resume source_http_429.
+SOURCE_THROTTLED = "source_http_429"
+RETRY_GATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS import_retry_gates (
+    run_id TEXT PRIMARY KEY NOT NULL,
+    retry_not_before_unix INTEGER NOT NULL CHECK (
+        typeof(retry_not_before_unix) = 'integer' AND retry_not_before_unix > 0
+    )
+);
+"""
 
 # Independent expected data for the fixed lab snapshot. Do not derive it from
 # the source implementation, stored checkpoint, or SQLite destination.
@@ -87,14 +101,18 @@ class Run:
     seen_cursors: tuple[str, ...]
     changed_records: int
     failure: str | None
+    retry_not_before_unix: int | None = None
 
     def result(self) -> dict:
-        return {
+        result = {
             "run_id": self.run_id, "snapshot": self.snapshot, "status": self.status,
             "committed_pages": self.committed_pages, "next_cursor": self.next_cursor,
             "processed_records": len(self.seen_ids), "changed_records": self.changed_records,
             "failure": self.failure,
         }
+        if self.retry_not_before_unix is not None:
+            result["retry_not_before_unix"] = self.retry_not_before_unix
+        return result
 
 
 def store_paths(name: str, *, create: bool) -> tuple[Path, Path]:
@@ -152,7 +170,18 @@ def open_state(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
 
 
 def read_run(db: sqlite3.Connection, run_id: str) -> Run:
-    row = db.execute("SELECT * FROM import_runs WHERE run_id = ?", (run_id,)).fetchone()
+    try:
+        row = db.execute(
+            """SELECT r.*, g.retry_not_before_unix FROM import_runs r
+               LEFT JOIN import_retry_gates g USING (run_id) WHERE r.run_id = ?""", (run_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        # Older stores (and stores with no saved throttle) are readable without migration.
+        if (getattr(error, "sqlite_errorcode", None) != sqlite3.SQLITE_ERROR
+                or str(error) != "no such table: import_retry_gates"):
+            raise
+        row = db.execute("SELECT r.*, NULL AS retry_not_before_unix FROM import_runs r WHERE run_id = ?",
+                         (run_id,)).fetchone()
     if row is None:
         raise LabError("run ID not found in this store", "unknown_run")
     try:
@@ -165,6 +194,10 @@ def read_run(db: sqlite3.Connection, run_id: str) -> Run:
         seen_cursors = tuple(cursors_data)
         pages = row["committed_pages"]
         cancelled = row["failure"] == CANCELLED_BEFORE_START
+        retry_at = row["retry_not_before_unix"]
+        if retry_at is not None and (type(retry_at) is not int or retry_at <= 0
+                                     or row["status"] != "failed" or row["failure"] != SOURCE_THROTTLED):
+            raise ValueError
         if (row["snapshot"] != SNAPSHOT or not 0 <= pages <= PAGE_LIMIT
                 or len(seen_ids) != pages * PAGE_SIZE or len(seen_ids) != len(set(seen_ids))
                 or len(seen_cursors) != min(pages, PAGE_LIMIT - 1)
@@ -179,7 +212,7 @@ def read_run(db: sqlite3.Connection, run_id: str) -> Run:
         raise LabError("stored checkpoint is inconsistent; inspect the store", "invalid_checkpoint") from None
     return Run(
         row["run_id"], row["snapshot"], "cancelled" if cancelled else row["status"], pages, row["next_cursor"],
-        seen_ids, seen_cursors, row["changed_records"], None if cancelled else row["failure"],
+        seen_ids, seen_cursors, row["changed_records"], None if cancelled else row["failure"], retry_at,
     )
 
 
@@ -231,16 +264,37 @@ def cancel_staff_request(db: sqlite3.Connection, run_id: str) -> Run:
 
 
 def resume_run(db: sqlite3.Connection, run_id: str) -> Run:
-    state = read_run(db, run_id)
-    if state.status == "cancelled":
-        raise LabError("request was cancelled before it started", "request_cancelled")
-    if state.status == "complete":
-        raise LabError("run is already complete")
-    if state.status == "failed" and state.failure not in RETRYABLE:
-        raise LabError("run is not safe to resume; inspect the recorded failure")
-    # If the previous worker was interrupted, acquiring the lease proves it no longer owns this store.
-    db.execute("UPDATE import_runs SET status = 'running', failure = NULL WHERE run_id = ?", (run_id,))
+    with transaction(db):
+        state = read_run(db, run_id)
+        if state.status == "cancelled":
+            raise LabError("request was cancelled before it started", "request_cancelled")
+        if state.status == "complete":
+            raise LabError("run is already complete")
+        retry_at = state.retry_not_before_unix
+        if state.status == "failed":
+            if retry_at is not None:
+                if time() < retry_at:
+                    raise LabError(f"source rate limit: wait until Unix time {retry_at} before resuming",
+                                   "source_retry_wait")
+            elif state.failure not in RETRYABLE:
+                raise LabError("run is not safe to resume; inspect the recorded failure")
+        # If the previous worker was interrupted, the caller holds the store lease.
+        db.execute("UPDATE import_runs SET status = 'running', failure = NULL WHERE run_id = ?", (run_id,))
+        if retry_at is not None:
+            db.execute("DELETE FROM import_retry_gates WHERE run_id = ?", (run_id,))
     return read_run(db, run_id)
+
+
+def record_failure(db: sqlite3.Connection, run_id: str, error: LabError | sqlite3.Error) -> None:
+    reason = error.code if isinstance(error, LabError) else "database_error"
+    retry_delay = error.retry_after_seconds if isinstance(error, LabError) and reason == SOURCE_THROTTLED else None
+    with transaction(db):
+        result = db.execute("UPDATE import_runs SET status = 'failed', failure = ? "
+                            "WHERE run_id = ? AND status = 'running'", (reason, run_id))
+        if result.rowcount and retry_delay is not None:
+            db.execute(RETRY_GATE_SCHEMA)
+            # Round up so operator resume never starts before the full advertised delay.
+            db.execute("INSERT INTO import_retry_gates VALUES (?, ?)", (run_id, ceil(time()) + retry_delay))
 
 
 def apply_page(db: sqlite3.Connection, state: Run, page: SourcePage) -> Run:
@@ -279,9 +333,7 @@ def run_import(db: sqlite3.Connection, state: Run) -> Run:
                 page = fetch_page(transport, token, state.next_cursor, state.committed_pages + 1)
                 state = apply_page(db, state, page)
     except (LabError, sqlite3.Error) as error:
-        reason = error.code if isinstance(error, LabError) else "database_error"
-        db.execute("UPDATE import_runs SET status = 'failed', failure = ? "
-                   "WHERE run_id = ? AND status = 'running'", (reason, state.run_id))
+        record_failure(db, state.run_id, error)
     return read_run(db, state.run_id)
 
 
@@ -324,6 +376,8 @@ def inspect_staff_queue() -> dict:
             if run.status == "running":
                 # A saved 'running' row alone cannot tell us whether a worker is alive.
                 next_action = "check_worker"
+            elif run.retry_not_before_unix is not None:
+                next_action = "wait_rate_limit" if time() < run.retry_not_before_unix else "resume_after_recovery"
             elif run.failure in RETRYABLE:
                 next_action = "resume_after_recovery"
             else:
@@ -332,6 +386,8 @@ def inspect_staff_queue() -> dict:
                 "run_id": run_id, "status": run.status, "committed_pages": run.committed_pages,
                 "next_action": next_action,
             }
+            if run.retry_not_before_unix is not None:
+                blocking_run["retry_not_before_unix"] = run.retry_not_before_unix
         return {"queued": queued, "blocking_run": blocking_run}
 
 
@@ -340,18 +396,21 @@ def reconcile_import(path: Path, run_id: str) -> dict:
     with closing(open_state(path, read_only=True)) as db:
         # The checkpoint and both destination queries share one read snapshot.
         db.execute("BEGIN")
-        run = read_run(db, run_id)
-        if run.status != "complete" or run.failure is not None:
-            raise LabError("reconciliation requires a complete run; inspect its status",
-                           "run_not_complete")
-        if run.snapshot not in RECONCILIATION_FIXTURES:
-            raise LabError("no fixed reference for this snapshot", "unknown_reference")
-        expected = dict(RECONCILIATION_FIXTURES[run.snapshot])
-        ids = tuple(expected)
-        placeholders = ", ".join("?" for _ in ids)
-        stored = dict(db.execute(f"SELECT id, title FROM records WHERE id IN ({placeholders})", ids))
-        stored_count = db.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        return reconcile_at(db, run_id)
 
+
+def reconcile_at(db: sqlite3.Connection, run_id: str) -> dict:
+    """Evaluate reconciliation from the caller's consistent SQLite transaction."""
+    run = read_run(db, run_id)
+    if run.status != "complete" or run.failure is not None:
+        raise LabError("reconciliation requires a complete run; inspect its status", "run_not_complete")
+    if run.snapshot not in RECONCILIATION_FIXTURES:
+        raise LabError("no fixed reference for this snapshot", "unknown_reference")
+    expected = dict(RECONCILIATION_FIXTURES[run.snapshot])
+    ids = tuple(expected)
+    placeholders = ", ".join("?" for _ in ids)
+    stored = dict(db.execute(f"SELECT id, title FROM records WHERE id IN ({placeholders})", ids))
+    stored_count = db.execute("SELECT COUNT(*) FROM records").fetchone()[0]
     missing_count = len(expected) - len(stored)
     unexpected_count = stored_count - len(stored)
     value_mismatches = sum(stored[case_id] != expected[case_id] for case_id in stored)

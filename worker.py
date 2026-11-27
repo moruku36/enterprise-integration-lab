@@ -13,14 +13,16 @@ PAGE_LIMIT = 3
 TOKEN = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 CURSOR = re.compile(r"[A-Za-z0-9_-]{1,64}")
 RECORD_ID = re.compile(r"SOURCE-[0-9]{3}")
+MAX_SOURCE_RETRY_DELAY = 300
 
 
 class LabError(Exception):
     """A bounded, sanitized failure suitable for the CLI."""
 
-    def __init__(self, message: str, code: str = "invalid_fixture"):
+    def __init__(self, message: str, code: str = "invalid_fixture", *, retry_after_seconds: int | None = None):
         super().__init__(message)
         self.code = code
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,17 @@ def request_token(client: httpx.Client, secret: str, *, scoped: bool = True) -> 
     return token
 
 
+def source_retry_delay(headers: httpx.Headers) -> int | None:
+    # The lab accepts one positive delay-seconds value, not HTTP-date, multiple hints,
+    # or an out-of-range delay. Never silently shorten an unsupported cooldown.
+    values = headers.get_list("Retry-After")
+    if len(values) == 1 and re.fullmatch(r"[0-9]{1,3}", values[0]):
+        delay = int(values[0])
+        if 1 <= delay <= MAX_SOURCE_RETRY_DELAY:
+            return delay
+    return None
+
+
 def fetch_page(client: httpx.Client, token: str, cursor: str | None, page: int) -> SourcePage:
     try:
         response = client.get(
@@ -71,8 +84,9 @@ def fetch_page(client: httpx.Client, token: str, cursor: str | None, page: int) 
     except httpx.HTTPError:
         raise LabError(f"page {page}: source unavailable", "source_unavailable") from None
     if response.status_code != 200:
+        delay = source_retry_delay(response.headers) if response.status_code == 429 else None
         raise LabError(f"page {page}: source returned HTTP {response.status_code}",
-                       f"source_http_{response.status_code}")
+                       f"source_http_{response.status_code}", retry_after_seconds=delay)
     try:
         payload = response.json()
     except ValueError:

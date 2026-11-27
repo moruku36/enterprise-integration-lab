@@ -14,6 +14,7 @@ import jwt
 
 from app import COOKIE, ORIGIN, app, sessions
 from keycloak.prepare_m3 import build_m3_realms
+import mock_source
 from mock_source import keys, source
 from service_profile import ISSUER, READ_SCOPE, SNAPSHOT, SOURCE, SOURCE_AUDIENCE, SOURCE_PATH, WORKER_CLIENT
 import test_oidc
@@ -93,6 +94,24 @@ class SourcePolicy(unittest.TestCase):
 
 
 class PagingChecks(unittest.TestCase):
+    def test_http_200_with_a_changed_page_two_marker_is_not_a_complete_read(self):
+        with (patch.object(mock_source, "FAIL_PAGE_TWO", False),
+              patch.object(mock_source, "DRIFT_PAGE_TWO", True)):
+            pages = [mock_source.read_cases(cursor) for cursor in (None, "after-002", "after-004")]
+        self.assertEqual([page["snapshot"] for page in pages], [SNAPSHOT, "case-fixture-drift-demo", SNAPSHOT])
+        self.assertEqual(pages[1]["next_cursor"], "after-004")
+        attempted = []
+
+        def send(request):
+            attempted.append(request.url.params.get("cursor"))
+            return httpx.Response(200, json=pages[len(attempted) - 1])
+
+        with httpx.Client(transport=httpx.MockTransport(send)) as client:
+            with self.assertRaisesRegex(LabError, "page 2: source snapshot changed") as refused:
+                fetch_all(client, "opaque-fixture")
+        self.assertEqual(refused.exception.code, "invalid_snapshot")
+        self.assertEqual(attempted, [None, "after-002"])
+
     def test_incomplete_or_repeated_page_is_never_a_complete_read(self):
         def page(next_cursor):
             return {"snapshot": SNAPSHOT, "records": [{"id": f"SOURCE-{n:03d}", "title": "Synthetic case"} for n in (1, 2)],

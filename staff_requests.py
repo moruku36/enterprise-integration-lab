@@ -3,8 +3,10 @@ from contextlib import closing
 import sqlite3
 from uuid import uuid4
 
-from import_job import MAX_QUEUED, SCHEMA, STAFF_STORE, open_state, read_run, store_paths, transaction
+from import_job import MAX_QUEUED, RUN_ID, SCHEMA, STAFF_STORE, open_state, read_run, store_paths, transaction
 from worker import LabError
+
+RECENT_LIMIT = 10
 
 
 def _status(db: sqlite3.Connection, run_id: str) -> dict:
@@ -55,3 +57,25 @@ def status(staff_sub: str, run_id: str) -> dict:
         if row is None:
             raise LabError("staff request not found", "unknown_request")
         return _status(db, run_id)
+
+
+def recent(staff_sub: str) -> list[dict]:
+    """Read only the authenticated owner's most recently accepted requests."""
+    try:
+        path, _ = store_paths(STAFF_STORE, create=False)
+    except LabError as error:
+        if error.code == "unknown_store":
+            return []
+        raise
+    with closing(open_state(path, read_only=True)) as db:
+        db.execute("BEGIN")
+        # The lab request table is append-only; rowid order is acceptance order,
+        # not a wall-clock timestamp. Select the owner before taking the limit.
+        rows = db.execute(
+            "SELECT run_id FROM staff_requests WHERE staff_sub = ? ORDER BY rowid DESC LIMIT ?",
+            (staff_sub, RECENT_LIMIT),
+        ).fetchall()
+        ids = [row["run_id"] for row in rows]
+        if any(not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id) for run_id in ids):
+            raise LabError("local staff store is inconsistent", "invalid_staff_store")
+        return [_status(db, run_id) for run_id in ids]

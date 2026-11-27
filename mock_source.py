@@ -11,6 +11,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from service_profile import ISSUER, JWKS_ENDPOINT, READ_SCOPE, SNAPSHOT, SOURCE_AUDIENCE, SOURCE_PATH, WORKER_CLIENT
 
 FAIL_PAGE_TWO = os.environ.get("LAB_M3_FAIL_PAGE_TWO") == "1"
+DRIFT_PAGE_TWO = os.environ.get("LAB_M3_DRIFT_PAGE_TWO") == "1"
+THROTTLE_PAGE_TWO = os.environ.get("LAB_M3_THROTTLE_PAGE_TWO") == "1"
+if sum((FAIL_PAGE_TWO, DRIFT_PAGE_TWO, THROTTLE_PAGE_TWO)) > 1:
+    raise RuntimeError("select only one synthetic page-two condition")
 
 PAGES = {
     None: (1, "after-002"),
@@ -83,9 +87,11 @@ def read_cases(cursor: str | None = None):
         raise HTTPException(400, "Unknown fixture cursor")
     if FAIL_PAGE_TWO and cursor == "after-002":
         raise HTTPException(503, "Simulated temporary outage on page two")
+    if THROTTLE_PAGE_TWO and cursor == "after-002":
+        raise HTTPException(429, "Simulated source rate limit on page two", headers={"Retry-After": "8"})
     start, following = PAGES[cursor]
     return {
-        "snapshot": SNAPSHOT,
+        "snapshot": "case-fixture-drift-demo" if DRIFT_PAGE_TWO and cursor == "after-002" else SNAPSHOT,
         "records": [{"id": f"SOURCE-{n:03d}", "title": f"Fictional source case {n}"}
                     for n in range(start, start + 2)],
         "next_cursor": following,

@@ -145,6 +145,63 @@ class StaffRequests(unittest.TestCase):
         self.assertNotEqual(replacement.json()["run_id"], body["run_id"])
         self.assertEqual(self.request("owner-a", key="replacement-key-02").status_code, 409)
 
+    def test_case_preview_uses_existing_reader_roles_and_never_creates_a_store(self):
+        url = "/api/imported-cases"
+        self.assertEqual(self.client.get(url).status_code, 401)
+        self.assertEqual(self.status(url, "worker", iss="http://localhost:8180/realms/workload-lab").status_code, 401)
+        self.assertEqual(self.status(url, "fixture-unmapped", "not-a-case-reader").status_code, 403)
+        for given_role in ("cases_viewer", "cases_importer"):
+            response = self.status(url, "synthetic-case-reader", given_role)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"staged": False, "snapshot": None, "records": []})
+        self.assertFalse(import_job.STATE_ROOT.exists())
+
+    def test_recent_empty_is_read_only_and_requires_staff_importer(self):
+        url = "/api/imports"
+        self.assertEqual(self.client.get(url).status_code, 401)
+        self.assertEqual(self.status(url, "owner-a", "cases_viewer").status_code, 403)
+        self.assertEqual(self.status(url, "worker", iss="http://localhost:8180/realms/workload-lab").status_code, 401)
+        reply = self.status(url, "owner-a")
+        self.assertEqual(reply.status_code, 200)
+        self.assertEqual(reply.json(), {"limit": 10, "requests": []})
+        self.assertEqual(reply.headers["cache-control"], "no-store")
+        self.assertFalse(import_job.STATE_ROOT.exists())
+
+    def test_recent_applies_owner_before_limit_and_exposes_only_safe_status(self):
+        old = self.request("owner-a").json()
+        own = [old]
+        path, lease = store_paths(STAFF_STORE, create=False)
+        with closing(open_state(path)) as db:
+            import_job.cancel_staff_request(db, old["run_id"])
+            for i in range(1, 14):
+                item = self.request("owner-a", key=f"private-fixture-key-{i}").json()
+                own.append(item)
+                import_job.cancel_staff_request(db, item["run_id"])
+            other = self.request("owner-b").json()
+            own.append(self.request("owner-a", key="private-final-fixture-key").json())
+        saved = path.read_bytes()
+        # Neither a query string nor an alternate importer can impersonate the owner.
+        reply = self.status("/api/imports?staff_sub=owner-b", "owner-a")
+        self.assertEqual(reply.status_code, 200)
+        items = reply.json()["requests"]
+        self.assertEqual([item["run_id"] for item in items], [item["run_id"] for item in reversed(own[-10:])])
+        self.assertEqual(items[0]["status"], "queued")
+        self.assertTrue(all(item["status"] == "cancelled" for item in items[1:]))
+        self.assertEqual(self.status("/api/imports?staff_sub=owner-a", "owner-b").json()["requests"], [other])
+        self.assertIn("status_url", items[0])
+        self.assertEqual(set(items[0]), set(old))
+        for unwanted in ("private-fixture-key", "owner-a", "owner-b", other["run_id"]):
+            self.assertNotIn(unwanted, reply.text)
+        self.assertEqual(path.read_bytes(), saved)
+        self.assertFalse(lease.exists())
+
+    def test_recent_invalid_store_does_not_claim_an_empty_history(self):
+        path, _ = store_paths(STAFF_STORE, create=True)
+        path.write_bytes(b"broken lab fixture, no confidential content")
+        reply = self.status("/api/imports", "owner-a")
+        self.assertEqual(reply.status_code, 503)
+        self.assertEqual(reply.json(), {"detail": "Local import store unavailable"})
+
     def test_browser_post_redirects_to_the_same_status_and_keeps_csrf(self):
         cookie = "test-browser-session"
         sessions[cookie] = Session(time.monotonic() + 60, {
@@ -162,6 +219,11 @@ class StaffRequests(unittest.TestCase):
         self.assertTrue(form_post.headers["location"].startswith("/import/status/"))
         replay = self.client.post("/import", data=form, headers={"Origin": ORIGIN})
         self.assertEqual(replay.headers["location"], form_post.headers["location"])
+        overview = self.client.get("/imports")
+        self.assertEqual(overview.status_code, 200)
+        self.assertIn(f'href="{form_post.headers["location"]}"', overview.text)
+        self.assertIn("queued", overview.text)
+        self.assertNotIn("fake-csrf-value", overview.text)
         status = self.client.get(form_post.headers["location"])
         self.assertEqual(status.status_code, 200)
         self.assertIn("queued", status.text)

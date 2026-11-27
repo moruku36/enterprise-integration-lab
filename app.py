@@ -18,6 +18,7 @@ from joserfc.errors import JoseError
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+import case_release
 from import_job import REQUEST_KEY, RUN_ID
 import staff_requests
 from worker import LabError
@@ -125,11 +126,24 @@ def permissions(
     return Staff(subject, role_set)
 
 
-@app.get("/api/cases")
-def list_cases(staff: Annotated[Staff, Depends(permissions)]):
+def require_case_access(staff: Staff) -> None:
     if not staff.roles.intersection({"cases_viewer", "cases_importer"}):
         raise HTTPException(403, "Case access required")
+
+
+@app.get("/api/cases")
+def list_cases(staff: Annotated[Staff, Depends(permissions)]):
+    require_case_access(staff)
     return CASES
+
+
+@app.get("/api/imported-cases")
+def imported_cases(staff: Annotated[Staff, Depends(permissions)]):
+    require_case_access(staff)
+    try:
+        return case_release.current()
+    except (LabError, OSError, sqlite3.Error):
+        raise HTTPException(503, "Local case preview unavailable") from None
 
 
 def importer(staff: Annotated[Staff, Depends(permissions)]) -> Staff:
@@ -138,9 +152,13 @@ def importer(staff: Annotated[Staff, Depends(permissions)]) -> Staff:
     return staff
 
 
+def with_status_url(result: dict) -> dict:
+    return {**result, "status_url": "/api/imports/" + result["run_id"]}
+
+
 def api_result(result: dict, *, status_code: int = 200) -> JSONResponse:
-    url = "/api/imports/" + result["run_id"]
-    return JSONResponse({**result, "status_url": url}, status_code=status_code, headers={"Location": url})
+    payload = with_status_url(result)
+    return JSONResponse(payload, status_code=status_code, headers={"Location": payload["status_url"]})
 
 
 @app.post("/api/imports", status_code=202)
@@ -160,6 +178,15 @@ async def request_import(request: Request, staff: Annotated[Staff, Depends(impor
     except (OSError, sqlite3.Error):
         raise HTTPException(503, "Local import store unavailable") from None
     return api_result(result, status_code=202 if created else 200)
+
+
+@app.get("/api/imports")
+def recent_imports(staff: Annotated[Staff, Depends(importer)]):
+    try:
+        recent = staff_requests.recent(staff.subject)
+    except (LabError, OSError, sqlite3.Error):
+        raise HTTPException(503, "Local import store unavailable") from None
+    return {"limit": staff_requests.RECENT_LIMIT, "requests": [with_status_url(row) for row in recent]}
 
 
 @app.get("/api/imports/{run_id}")
@@ -234,6 +261,8 @@ async def home(request: Request):
     request_key = secrets.token_hex(16)
     return f'''<h1>Enterprise Integration Lab</h1>
 <p>List API: HTTP {result.status_code}</p><pre>{data}</pre>
+<p><a href="/imported-cases">Verified imported case preview</a></p>
+<p>Importers: <a href="/imports">Recent import requests</a></p>
 <form method="post" action="/import"><button>Request import</button><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="key" value="{request_key}"></form>
 <form method="post" action="/logout"><button>End app session</button><input type="hidden" name="csrf" value="{csrf}"></form>'''
 
@@ -273,6 +302,37 @@ async def browser_import(request: Request):
     if result.status_code not in {200, 202}:
         return api_error(result)
     return RedirectResponse("/import/status/" + result.json()["run_id"], status_code=303)
+
+
+@app.get("/imported-cases", response_class=HTMLResponse)
+async def browser_imported_cases(request: Request):
+    result = await call_api(request, "GET", "/api/imported-cases")
+    if result.status_code != 200:
+        return api_error(result)
+    data = result.json()
+    if data["staged"]:
+        body = "<ul>" + "".join(
+            f'<li>{escape(row["id"])}: {escape(row["title"])}</li>' for row in data["records"]
+        ) + "</ul>"
+    else:
+        body = "<p>No verified preview staged yet.</p>"
+    return '<h1>Verified imported case preview</h1>' + body + '<p><a href="/">Home</a></p>'
+
+
+@app.get("/imports", response_class=HTMLResponse)
+async def browser_recent_imports(request: Request):
+    result = await call_api(request, "GET", "/api/imports")
+    if result.status_code != 200:
+        return api_error(result)
+    listing = result.json()
+    labels = []
+    for row in listing["requests"]:
+        run_id = escape(row["run_id"], quote=True)
+        status = escape(row["status"])
+        labels.append(f'<li><a href="/import/status/{run_id}">{run_id}</a>: {status}</li>')
+    body = "<ul>" + "".join(labels) + "</ul>" if labels else "<p>No import requests yet.</p>"
+    return (f'<h1>Recent import requests</h1><p>Up to {listing["limit"]}, newest first.</p>'
+            + body + '<p><a href="/">Home</a></p>')
 
 
 @app.get("/import/status/{run_id}", response_class=HTMLResponse)

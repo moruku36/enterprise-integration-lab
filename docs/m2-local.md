@@ -63,6 +63,39 @@ returns 403, check the signed group attribute name and full path against the exp
 role mappings. Reauthenticate after changing group membership. Previously issued app
 access tokens can retain their old roles until expiry.
 
+## Trace the fixture roles without servers
+
+Once the local Python dependencies are installed, run:
+
+```sh
+.venv/bin/python -B examples/identity_role_matrix.py
+```
+
+The script reads the direct realm assignments and the generated customer group
+and broker mappings from the checked-in fixture setup. It models only the
+registered fixture's exact full group paths and case-role assignments. It
+stops rather than predicting a result for an unsupported mapper or role shape.
+Ephemeral, locally signed test access claims then exercise two read-only
+endpoints of the real app in-process: `GET /api/cases` and
+`GET /api/imports`. No realm files, store, assertion, token, cookie, key,
+or password is written or emitted. Only fictional profile/group/role labels
+and HTTP status codes appear.
+
+For direct and federated viewers, case listing returns 200 and the
+importer-only list returns 403. Both importers get 200 on both endpoints.
+The unmapped customer fixture has no case roles and gets 403 on both.
+The importer-only check reads a list, so its 200 does not create an import
+request (the separate live browser submission returns 303). This is a
+fixture model and an API-boundary check, not an actual SAML assertion,
+OIDC sign-in/issuance, role sync at login, token revocation, or Keycloak
+interop result. Use the live local exercise below for protocol behavior
+when appropriate.
+
+**日本語メモ：** 設定にあるグループ名とロールの対応を読み取り、アプリの読み取りAPI
+を試します。閲覧者は案件だけ、取り込み担当者は依頼一覧も読めます。割り当てなしの
+架空利用者は両方とも403です。認証サーバーとは通信せず、トークン・鍵・パスワード
+も表示しません。SAMLやOIDCで実際にログインした結果とは別です。
+
 ## Verify
 
 ```sh
