@@ -88,12 +88,19 @@ def worker(root, *args, expected):
     return json.loads(result.stdout) if result.stdout else result.stderr
 
 
+def stage_preview(root, run_id):
+    result = subprocess.run([sys.executable, "-m", "case_release", "stage", run_id],
+                            cwd=root, capture_output=True, text=True, timeout=12)
+    assert result.returncode == 0, result.returncode
+    return json.loads(result.stdout)
+
+
 def verify():
     direct = BrowserFlow("test_callback_rejects_missing_transaction")
     federated = FederatedFlow("test_federated_group_mapping_and_denial")
     with TemporaryDirectory(prefix="enterprise-staff-check-") as tmp:
         root = Path(tmp).resolve()
-        for module in ("app", "staff_requests", "import_job", "service_profile", "worker"):
+        for module in ("app", "staff_requests", "import_job", "service_profile", "worker", "case_release"):
             shutil.copy2(ROOT / f"{module}.py", root)
         (root / ".keycloak-m3-fixture").symlink_to(ROOT / ".keycloak-m3-fixture", target_is_directory=True)
         with app_process(root), browser() as first, browser() as viewer:
@@ -108,18 +115,26 @@ def verify():
             assert url == "/import/status/" + run_id and initial["status"] == "queued"
             assert initial["processed_records"] == initial["committed_pages"] == 0
             assert first.get("/api/imports/" + run_id).status_code == 401  # cookie is not API auth
+            assert first.get("/api/imports").status_code == 401
             direct.sign_in(viewer, "viewer")
             assert viewer.get(url).status_code == 403
+            assert viewer.get("/imports").status_code == 403
             assert post_form(viewer, import_form(viewer)).status_code == 403
 
-        with app_process(root), browser() as restored, browser() as other:
+        with app_process(root), browser() as restored, browser() as other, browser() as reading_viewer:
             direct.sign_in(restored, "importer")
+            before = restored.get("/imports")
+            assert before.status_code == 200 and f'href="{url}"' in before.text and "queued" in before.text
+            assert form["key"] not in before.text
             assert status(restored, url) == initial
             # A fresh app process/session, same owner and browser form idempotency key.
             replay = post_form(restored, {**import_form(restored), "key": form["key"]})
             assert (replay.status_code, replay.headers["location"]) == (303, url)
             federated.sign_in(other, "customer-importer")
             assert other.get(url).status_code == 404
+            other_list = other.get("/imports")
+            assert other_list.status_code == 200 and "No import requests yet." in other_list.text
+            assert run_id not in other_list.text
 
             with source_process(fail_page_two=True):
                 failed = worker(root, "run-request", run_id, expected=1)
@@ -134,6 +149,19 @@ def verify():
             assert complete["run_id"] == run_id and complete["status"] == "complete"
             assert complete["committed_pages"] == 3 and complete["processed_records"] == 6
             assert complete["changed_records"] == 6 and complete["failure"] is None
+            after = restored.get("/imports")
+            assert after.status_code == 200 and f'href="{url}"' in after.text and "complete" in after.text
+            direct.sign_in(reading_viewer, "viewer")
+            before_preview = reading_viewer.get("/imported-cases")
+            assert before_preview.status_code == 200 and "No verified preview staged yet." in before_preview.text
+            with browser() as unsigned:
+                assert unsigned.get("/api/imported-cases").status_code == 401
+            staged = stage_preview(root, run_id)
+            assert staged == {"run_id": run_id, "snapshot": "case-fixture-v1", "records": 6, "changed": True}
+            assert not stage_preview(root, run_id)["changed"]
+            validated = reading_viewer.get("/imported-cases")
+            assert validated.status_code == 200 and run_id not in validated.text
+            assert all(f"SOURCE-{n:03d}: Fictional source case {n}" in validated.text for n in range(1, 7))
             assert "already started" in worker(root, "run-request", run_id, expected=1)
             final_replay = post_form(restored, {**import_form(restored), "key": form["key"]})
             assert final_replay.headers["location"] == url and status(restored, url) == complete
@@ -151,6 +179,10 @@ def verify():
         print(json.dumps({
             "survived_app_restart": True, "same_request_same_run": True,
             "viewer_denied": True, "other_importer_cannot_read": True,
+            "listed_own_request_after_restart": True, "other_importer_listing_excluded_request": True,
+            "listing_reflected_completion": True,
+            "preview_empty_after_completion_before_stage": True, "viewer_received_six_after_stage": True,
+            "preview_unauthorized_api_denied": True, "preview_stage_replay_unchanged": True,
             "failure": after_fail["failure"], "saved_pages": after_fail["committed_pages"],
             "saved_records": after_fail["processed_records"], "same_run_resumed": True,
             "complete_pages": complete["committed_pages"], "complete_records": complete["processed_records"],

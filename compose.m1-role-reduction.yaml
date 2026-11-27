@@ -1,0 +1,10 @@
+# Opt-in override for the synthetic role reduction exercise only.
+services:
+  identity:
+    volumes:
+      - type: bind
+        source: ./.keycloak-m1-role-reduction/integration-lab-realm.json
+        target: /opt/keycloak/data/import/integration-lab-realm.json
+        read_only: true
+        bind:
+          create_host_path: false

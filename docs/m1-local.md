@@ -37,11 +37,9 @@ on the current branch [M3c](m3-staff-requests.md) saves a request but does not s
 - Both fixture users should be able to list cases. The fixed audience mapper is scoped to
   `lab-web`: it places `cases-api` in both access tokens, not in ID tokens. A viewer's import
   denial is therefore **403 after authentication**, not a 401 caused by the wrong audience.
-- For the hands-on exercise, copy the realm fixture for safekeeping, remove `cases_importer`
-  from the importer account’s `realmRoles` (keep `cases_viewer`), then rebuild **only this
-  lab's disposable** Keycloak container with `docker compose down` and `docker compose up -d`.
-  Use a new private browser session. Predict and verify list 200 / import 403, then restore
-  the original fixture. This exercise tests new sign-ins, not revocation of already issued tokens.
+- In the [role reduction exercise](m1-role-reduction.md), predict and verify the
+  change from import allowed to 403 in a fresh sign-in while listing stays
+  available. The disposable override leaves the original realm fixture unchanged.
 
 ## Automated checks
 

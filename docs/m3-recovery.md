@@ -59,6 +59,8 @@ environment variable before the healthy restart.
   service and explicitly resume the same run. There is no automatic retry.
   A run left `running` by an interrupted process can resume once that process
   releases the store lease.
+- A source 429 requires a supported `Retry-After` and a saved deadline.
+  [Try the bounded cooldown exercise](m3-rate-limit.md) (M3i); no retry is automatic.
 - Do not resume a 401, 403, changed snapshot, invalid or repeated cursor,
   duplicate record, or database error. Check configuration and data integrity
   first. The CLI rejects resuming a known nontransient failure. A separate store
@@ -133,6 +135,39 @@ disposable stores.
 日本語メモ：上のコマンド1つで、途中で止まった取り込みを合成データで
 再開し、「6件で完了」と「正しい6件」の違いを確認できます。OIDCやSAML
 を試す手順とは別です。既存データには触れません。
+
+## Contrast a snapshot change with a temporary outage (M3h)
+
+A provider can return **HTTP 200** even when the returned page no longer
+belongs to the version used for page one. Retrying a temporary outage and
+combining two different snapshot versions are not the same operation.
+
+With the disposable M3 Keycloak fixture running, port 8001 free, and lab
+dependencies installed, use the same local acceptance runner with a different
+scenario:
+
+```sh
+.venv/bin/python tests/check_live_recovery.py --scenario snapshot-drift
+```
+
+The runner launches its own synthetic loopback source. Its fault is the changed
+snapshot marker on page two, not an HTTP error, bad credential, or altered
+record format. The real importer exits with `invalid_snapshot` and keeps only
+page one (two rows). Even after the healthy source returns, explicit `resume` on
+the same run is refused and the failed store is unchanged. The runner then
+starts a separate store, completes and reconciles its six rows, and removes
+only its temporary test stores. The default runner without `--scenario` still
+demonstrates that a temporary HTTP 503 can be resumed under the same run ID.
+
+For a manual local demonstration, set `LAB_M3_DRIFT_PAGE_TWO=1` on the source
+process instead of the outage flag; the source refuses both options together.
+The normal source returns the fixed snapshot and does not activate either
+fault. This is a simulated marker change, not a test of a mutable production
+API or a replacement for a real snapshot/version contract.
+
+日本語メモ：2ページ目のHTTP応答が200でも、版の目印が変わったら別データとして
+停止します。1ページ目の2件を保持し、元の版に戻っても同じ実行IDでは再開しません。
+一時的な503なら同じIDで再開できます。演習はどちらも架空のデータのみです。
 
 ## Reference checks
 

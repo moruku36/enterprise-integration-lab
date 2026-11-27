@@ -20,6 +20,8 @@ import jwt
 import import_job
 from app import AUDIENCE, CLIENT, COOKIE, ISSUER, ORIGIN, app, jwks, sessions
 
+ROLE_REDUCTION = os.environ.get("RUN_LOCAL_OIDC_ROLE_REDUCTION") == "1"
+
 
 class ApiValidation(unittest.TestCase):
     @classmethod
@@ -89,6 +91,7 @@ class BrowserFlow(unittest.TestCase):
         self.assertNotEqual(pre_auth, browser.cookies.get(COOKIE))
         self.assertNotIn(pre_auth, sessions)
 
+    @unittest.skipIf(ROLE_REDUCTION, "this fixture has deliberately lost the importer grant")
     def test_users_have_distinct_roles_after_real_oidc(self):
         directory = self.enterContext(TemporaryDirectory())
         self.enterContext(patch.object(import_job, "STATE_ROOT", Path(directory) / "state"))
@@ -105,8 +108,27 @@ class BrowserFlow(unittest.TestCase):
                     self.assertEqual(response.status_code, import_status)
                     if import_status == 303:
                         self.assertIn("queued", browser.get(response.headers["location"]).text)
+                        self.assertEqual(len(import_job.inspect_staff_queue()["queued"]), 1)
                     self.assertEqual(browser.post("/logout", data={"csrf": csrf}, headers={"Origin": ORIGIN}).status_code, 303)
                     self.assertIn("Sign in", browser.get("/").text)
+
+    @unittest.skipUnless(ROLE_REDUCTION, "opt in with the disposable viewer-only fixture")
+    def test_fresh_login_after_importer_role_reduction(self):
+        directory = self.enterContext(TemporaryDirectory())
+        state = Path(directory) / "state"
+        self.enterContext(patch.object(import_job, "STATE_ROOT", state))
+        with TestClient(app, base_url=ORIGIN, follow_redirects=False) as browser:
+            self.sign_in(browser, "importer")
+            home = browser.get("/")
+            self.assertEqual(home.status_code, 200)
+            self.assertIn("List API: HTTP 200", home.text)
+            csrf = re.search(r'name="csrf" value="([^"]+)"', home.text).group(1)
+            key = re.search(r'name="key" value="([a-f0-9]{32})"', home.text).group(1)
+            response = browser.post("/import", data={"csrf": csrf, "key": key}, headers={"Origin": ORIGIN})
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json(), {"detail": "Importer role required"})
+            self.assertFalse(state.exists(), "authorization denial must not create a store")
+            self.assertEqual(browser.post("/logout", data={"csrf": csrf}, headers={"Origin": ORIGIN}).status_code, 303)
 
     def test_callback_rejects_missing_transaction(self):
         with TestClient(app, base_url=ORIGIN, follow_redirects=False) as browser:

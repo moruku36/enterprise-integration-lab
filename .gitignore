@@ -4,6 +4,7 @@ __pycache__/
 .env
 
 # Generated synthetic keys and realm imports (never commit).
+/.keycloak-m1-role-reduction/
 /.keycloak-m2/
 /.keycloak-m3-fixture/
 /.import-lab/
